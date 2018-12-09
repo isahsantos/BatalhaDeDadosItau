@@ -1,0 +1,288 @@
+/* OLS
+ *
+ * This class presents a implementation of OLS (Ordinary Least Squares)
+ * algorithm for multiple linear regression.
+ */
+
+import breeze.linalg._
+import breeze.stats._
+import breeze.stats.distributions.StudentsT
+
+class OLSLinearRegression(
+                           val observations: breeze.linalg.DenseMatrix[Double],
+                           val outputs: breeze.linalg.DenseVector[Double]
+                         ) {
+                             
+  import breeze.linalg._
+  import breeze.stats._
+  import breeze.stats.distributions.StudentsT
+
+  var beta: breeze.linalg.DenseVector[Double] = breeze.linalg.DenseVector.zeros[Double](observations.cols)
+
+  // Fit the model and return regression coefficients beta
+  def fit(): breeze.linalg.DenseVector[Double] = {
+    try {
+      val cov = breeze.linalg.DenseMatrix.zeros[Double](observations.cols, observations.cols) + (observations.t * observations)
+      val scaled = breeze.linalg.DenseVector.zeros[Double](observations.cols) + (observations.t * outputs)
+      beta = cov \ scaled
+      beta
+    } catch {
+      case ex: MatrixSingularException => beta
+    }
+  }
+
+  // True if model is fitted and has not zero coefficients
+  def isFitted: Boolean = beta.findAll(x => x == 0.0).length != beta.length
+
+  // Degrees of freedom of model
+  def degreesOfFreedom: Int = observations.rows - observations.cols
+
+  // Mean squared error
+  def mse: Double = {
+    if (!isFitted || degreesOfFreedom <= 0)
+      .0
+    else {
+      val dif = observations * beta - outputs
+      sum(dif :* dif) / degreesOfFreedom
+    }
+  }
+
+  // t-values of regression model coefficients
+  def tValues: Seq[Double] = {
+    for (i <- 0 until beta.length)
+      yield calcTValue(i)
+  }
+
+  // p-values of regression model coefficients
+  def pValues: Seq[Double] = {
+    for (i <- 0 until beta.length)
+      yield calcPValue(i)
+  }
+
+  private def calcPValue(col: Int): Double = {
+    if (!isFitted || degreesOfFreedom <= 0)
+      .0
+    else {
+      val t = calcTValue(col)
+      2.0 * (1.0 - StudentsT(degreesOfFreedom.toDouble).cdf(math.abs(t)))
+    }
+  }
+
+  private def calcTValue(col: Int): Double = {
+    if (!isFitted || degreesOfFreedom <= 0)
+      .0
+    else {
+      val xi = observations(::, col)
+      val x_diff = xi - mean(xi)
+      val coefSD = math.sqrt(sum(x_diff :* x_diff))
+      val SE = math.sqrt(mse) / coefSD
+      beta(col) / SE
+    }
+  }
+}
+
+/* RANSAC
+ *
+ * This class presents a implementation of RANSAC (RANdom SAmple Consensus)
+ * algorithm for multiple linear regression.
+ * The multiple linear regression is made using OLS Linear Regression
+ *
+ */
+
+import breeze.linalg._
+
+class RANSAC(
+        observations: breeze.linalg.DenseMatrix[Double],
+        output: breeze.linalg.DenseVector[Double],
+        samplePerc: Double = 0.10,
+        minSampleSize: Int = 7,
+        minIteration: Int = 50,
+        maxIteration: Int = 500,
+        maxDistToBeInlier: Double = 0.05,
+        minInlierPerctoStop: Double = 0.70
+        ){
+    
+    val nPopula: Int = observations.rows
+    val nTrain: Int = List(minSampleSize,math.floor(samplePerc*nPopula)).max.toInt
+    val nCheck: Int = nPopula-nTrain
+    
+    def fitting(): (breeze.linalg.DenseVector[Double], Seq[Double], Double) = {
+        
+        import breeze.linalg.{DenseVector,DenseMatrix,sum}
+        import scala.util.Random // to use Random
+        
+        var betaBest = DenseVector.zeros[Double](2)
+        var pValuesBest = Seq[Double](0,0)
+        var mseBest = 0.0
+        var nInlierBest: Double = 0
+        var int = 0
+        
+        do{ 
+            int = int + 1
+            
+            // Defining the data sets to train and check
+            val r = new Random//(512) // seed 
+            val index = r.shuffle(0 to nPopula-1)
+            val trainIndex = index.take(nTrain)
+            val checkIndex = index.reverse.take(nCheck)
+            val observationsTrain = observations(trainIndex,::).toDenseMatrix
+            val outputTrain = output(trainIndex).toDenseVector
+            val observationsCheck = observations(checkIndex,::).toDenseMatrix
+            val outputCheck = output(checkIndex).toDenseVector
+            
+            // Curve fitting to the train set
+            val (beta, pValues, mse) = fitSample(observationsTrain, outputTrain)
+            
+            // Curve evaluation to the check set
+            val dist = distance(observationsCheck, outputCheck, beta)
+            val nInlier = dist.map(d => if(d < maxDistToBeInlier) 1 else 0).sum.toDouble
+            
+            // Getting the best solution
+            if(nInlier >= nInlierBest){
+                nInlierBest = nInlier
+                betaBest = beta
+                pValuesBest = pValues
+                mseBest = mse
+            }
+        } 
+        while( (int < minIteration) || ((int < maxIteration) && (nInlierBest/nCheck < minInlierPerctoStop)) )
+        
+        // Getting the largest inlier set
+        val diff = distance(observations, output, betaBest)
+        val inlierObservations = observations(diff <:< maxDistToBeInlier, ::).toDenseMatrix
+        val inlierOutput = output(diff <:< maxDistToBeInlier).toDenseVector
+    
+        // Priting the informations
+        val inlierPerc = inlierObservations.rows.toDouble/nPopula 
+        println("\n\t-> Parameters: " + "samplePerc="+samplePerc+" (n: "+nTrain+")" + ", maxDistToBeInlier="+maxDistToBeInlier + ", minInlierPerctoStop="+minInlierPerctoStop+"("+inlierPerc+")" + ", number of interactios = "+int+" (min: "+minIteration+" max: "+maxIteration+").\n")
+    
+        // Curve fitting to the largest inlier set
+        val lr = new OLSLinearRegression(inlierObservations, inlierOutput)
+        val lrBeta = lr.fit()
+    
+        return(lrBeta, lr.pValues, lr.mse)
+    }
+    
+    def fitSample(observations: breeze.linalg.DenseMatrix[Double],
+                  output: breeze.linalg.DenseVector[Double]): 
+                  (breeze.linalg.DenseVector[Double], Seq[Double], Double) = {
+
+        val lr = new OLSLinearRegression(observations, output)
+        val beta = lr.fit()
+
+        return(beta, lr.pValues, lr.mse)
+    }
+    
+    
+    private def distance(observations: breeze.linalg.DenseMatrix[Double],
+                         output: breeze.linalg.DenseVector[Double],
+                         beta: breeze.linalg.DenseVector[Double]): 
+                         breeze.linalg.DenseVector[Double] = {
+        
+        import breeze.linalg.sum // To use sum
+        import scala.math.{sqrt, abs} // to use sqrt and abs
+        ((output - observations * beta)/sqrt(sum(beta(1 until beta.size) * beta(1 until beta.size)) + 1)).map(x => abs(x))
+    }
+
+}
+
+/*
+ * Data set from IDEB (http://portal.inep.gov.br/ideb) with features of the students, 
+ * professors and economy related to the year of 2017(1)
+ *
+ * (1) The data from economy is related to the year of 2014.
+ */
+
+val xy = base
+            .select("TaxaAprovacao", "TaxaAbandono", "TaxaReprovacao", "MediaAlunosTurma", "TaxaNaoResposta", "MediaHorasAula", "PercentualDocentesES", "PercentualDocentesGrupo45", "RendaMensalPerCapta", "RemuneracaoDiariaDocente")
+            .collect()
+            .map(t => ( 
+                        t(0).toString.toDouble, 
+                        t(1).toString.toDouble, 
+                        t(2).toString.toDouble, 
+                        t(3).toString.toDouble, 
+                        t(4).toString.toDouble, 
+                        t(5).toString.toDouble, 
+                        t(6).toString.toDouble, 
+                        t(7).toString.toDouble, 
+                        t(8).toString.toDouble, 
+                        t(9).toString.toDouble
+                    )
+                ).toArray
+
+val y  = xy.map(t => t._1)
+val x1 = xy.map(t => t._2)
+val x2 = xy.map(t => t._3)
+val x3 = xy.map(t => t._4)
+val x4 = xy.map(t => t._5)
+val x5 = xy.map(t => t._6)
+val x6 = xy.map(t => t._7)
+val x7 = xy.map(t => t._8)
+val x8 = xy.map(t => t._9)
+val x9 = xy.map(t => t._10)
+
+// Converting for the format used in the regression
+import breeze.linalg._
+val ones = DenseVector.ones[Double](x1.length).asDenseMatrix
+val x_vars = DenseMatrix.vertcat(
+                                    ones, 
+                                    DenseMatrix(x1), 
+                                    DenseMatrix(x2), 
+                                    DenseMatrix(x3), 
+                                    DenseMatrix(x4), 
+                                    DenseMatrix(x5), 
+                                    DenseMatrix(x6), 
+                                    DenseMatrix(x7), 
+                                    DenseMatrix(x8), 
+                                    DenseMatrix(x9)
+                                ).t
+val y_vars = DenseVector(y)
+
+val linMod_ransac = new RANSAC(
+                            observations = x_vars,
+                            output = y_vars,
+                            samplePerc = 0.10,
+                            minSampleSize = 2,
+                            minIteration = 10,
+                            maxIteration = 100,
+                            maxDistToBeInlier = 1.0,
+                            minInlierPerctoStop = 0.70
+                            )
+val (beta, pValues, mse) = linMod_ransac.fitting()
+val sde = math.sqrt(mse) // RMSE
+
+val yPred = (x_vars * beta).toArray
+
+val error = y-yPred
+
+/* Ridge Regression
+ *
+ * Multiple linear regression via Ridge Regression from ML, 
+ * which is Apache Spark's scalable machine learning library.
+ */
+
+val baseRight = base
+                    .select("TaxaAprovacao", "TaxaAbandono", "TaxaReprovacao", "MediaAlunosTurma", "TaxaNaoResposta", "MediaHorasAula", "PercentualDocentesES", "PercentualDocentesGrupo45", "RendaMensalPerCapta", "RemuneracaoDiariaDocente")
+
+val indVars = baseRight.columns.tail
+    
+import org.apache.spark.ml.feature.VectorAssembler
+val assembler = new VectorAssembler()
+                          .setInputCols(indVars.toArray)
+                          .setOutputCol("features")
+
+val dataForModel = assembler.transform(baseRight)
+
+import org.apache.spark.ml.regression.LinearRegression
+val penaltyWeight = 0.01
+val lr_ridge = new LinearRegression()
+                          .setMaxIter(100)
+                          .setRegParam(penaltyWeight)
+                          .setElasticNetParam(0.0)
+                          .setLabelCol("TaxaAprovacao")//(indVars(0))
+  
+val lrModel = lr_ridge.fit(dataForModel)
+
+lrModel.getLabelCol
+
+indVars.zip(lrModel.coefficients.toArray).toList.toDF("features", "weights").sort($"weights".desc).show(false)
